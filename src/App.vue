@@ -14,6 +14,9 @@
           </li>
         </ul>
       </div>
+      <div class="navbar-end pr-4">
+        <span class="text-xs text-neutral-content/60">v{{ appVersion }} &middot; {{ buildDate }}</span>
+      </div>
     </nav>
 
     <main class="flex-grow">
@@ -39,7 +42,7 @@
 </template>
 
 <script>
-/* global QRLLIB */
+/* global QRLLIB, __APP_VERSION__, __BUILD_DATE__ */
 import logoSvgRaw from '/logo.svg?raw';
 
 const MAX_QRLLIB_RETRIES = 100; // 100 retries * 100ms = 10 seconds max
@@ -50,7 +53,9 @@ export default {
     return {
       qrllibLoaded: false,
       qrllibLoadFailed: false,
-      logoSvg: 'data:image/svg+xml;base64,' + btoa(logoSvgRaw)
+      logoSvg: `data:image/svg+xml;base64,${btoa(logoSvgRaw)}`,
+      appVersion: __APP_VERSION__,
+      buildDate: __BUILD_DATE__,
     };
   },
   mounted() {

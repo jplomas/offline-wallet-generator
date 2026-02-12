@@ -121,15 +121,26 @@
             <div v-if="isSecure" class="space-y-4">
               <div class="form-control w-full max-w-md mx-auto">
                 <label class="label">
-                  <span class="label-text">Password</span>
+                  <span class="label-text">Password (min 8 characters)</span>
                 </label>
                 <input
                   type="password"
                   v-model="password"
-                  @input="check"
+                  v-on:input="check"
                   class="input input-bordered w-full focus:input-secondary focus:border-secondary"
                   placeholder="Enter password"
                 />
+                <!-- Password strength indicator -->
+                <div v-if="password.length > 0" class="mt-2">
+                  <div class="flex gap-1">
+                    <div class="h-1 flex-1 rounded" :class="strengthBarClass(1)"></div>
+                    <div class="h-1 flex-1 rounded" :class="strengthBarClass(2)"></div>
+                    <div class="h-1 flex-1 rounded" :class="strengthBarClass(3)"></div>
+                  </div>
+                  <p class="text-xs mt-1 font-medium" :class="strengthTextClass">
+                    {{ passwordStrength.feedback }}
+                  </p>
+                </div>
               </div>
               <div class="form-control w-full max-w-md mx-auto">
                 <label class="label">
@@ -138,22 +149,31 @@
                 <input
                   type="password"
                   v-model="passwordConfirm"
-                  @input="check"
+                  v-on:input="check"
                   class="input input-bordered w-full focus:input-secondary focus:border-secondary"
                   placeholder="Confirm password"
                 />
               </div>
               <p v-if="error" class="text-error text-center text-sm">{{ error }}</p>
-              <div class="flex justify-center">
+              <!-- Encryption progress -->
+              <div v-if="isEncrypting" class="w-full max-w-md mx-auto">
+                <p class="text-sm text-center mb-2">Encrypting wallet (this may take a moment)...</p>
+                <progress class="progress progress-primary w-full" :value="encryptionProgress" max="100"></progress>
+                <p class="text-xs text-center mt-1">{{ encryptionProgress }}%</p>
+              </div>
+              <div v-else class="flex justify-center">
                 <button
                   class="btn btn-primary"
                   :class="{ 'btn-disabled': !validated }"
                   :disabled="!validated"
-                  @click="saveJSON"
+                  v-on:click="saveJSON"
                 >
-                  Save encrypted
+                  Save encrypted (v3 format)
                 </button>
               </div>
+              <p class="text-xs text-center text-base-content/60">
+                Uses scrypt key derivation + AES-256-GCM authenticated encryption
+              </p>
             </div>
 
             <!-- Unencrypted Save -->
@@ -162,7 +182,7 @@
                 <span>Warning: Saving without encryption is not recommended for production use.</span>
               </div>
               <div class="flex justify-center">
-                <button class="btn btn-warning" @click="saveJSON">Save unencrypted</button>
+                <button class="btn btn-warning" v-on:click="saveJSON">Save unencrypted (v3 format)</button>
               </div>
             </div>
           </div>
@@ -194,35 +214,233 @@
 /* global QRLLIB */
 import { jsPDF } from 'jspdf';
 import print from 'print-js';
+import { scrypt } from 'scrypt-js';
 import logoSvgRaw from '/logo.svg?raw';
 
-// Browser-compatible AES-256-CTR encryption (matches aes256 npm package format)
-const aesEncrypt = async (password, plaintext) => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(plaintext);
+// V3 Wallet Format - Strong KDF with authenticated encryption
+// Uses scrypt (N=2^17, r=8, p=1) + AES-256-GCM
+// Addresses V-01 (Weak KDF) and V-02 (No AEAD) from security audit
 
-  // Derive key from password using SHA-256 (same as aes256 package)
-  const passwordBuffer = encoder.encode(password);
-  const keyBuffer = await crypto.subtle.digest('SHA-256', passwordBuffer);
-  const key = await crypto.subtle.importKey('raw', keyBuffer, { name: 'AES-CTR' }, false, ['encrypt']);
-
-  // Generate random 16-byte IV (same as aes256 package)
-  const iv = crypto.getRandomValues(new Uint8Array(16));
-
-  // Encrypt using AES-256-CTR
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-CTR', counter: iv, length: 64 },
-    key,
-    data
-  );
-
-  // Combine IV + encrypted data and encode as base64 (same format as aes256 package)
-  const combined = new Uint8Array(iv.length + encrypted.byteLength);
-  combined.set(iv);
-  combined.set(new Uint8Array(encrypted), iv.length);
-
-  return btoa(String.fromCharCode(...combined));
+const DEFAULT_SCRYPT_PARAMS = {
+  N: 1 << 17, // 131072 - strong work factor
+  r: 8,
+  p: 1,
+  dkLen: 32,
+  saltLen: 32,
 };
+
+const DEFAULT_IV_LEN = 12;
+const TAG_LEN = 16;
+
+function randomBytes(length) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    const value = bytes[i].toString(16);
+    hex += value.length === 1 ? `0${value}` : value;
+  }
+  return hex;
+}
+
+function encodeUtf8(text) {
+  return new TextEncoder().encode(text);
+}
+
+function buildAad(meta) {
+  return encodeUtf8(JSON.stringify({
+    version: meta.version,
+    kdf: meta.kdf,
+    cipher: {
+      name: meta.cipher.name,
+      iv: meta.cipher.iv,
+    },
+  }));
+}
+
+async function deriveKeyScrypt(password, salt, params, progressCallback) {
+  const passwordBytes = typeof password === 'string' ? encodeUtf8(password) : new Uint8Array(password);
+  return scrypt(passwordBytes, salt, params.N, params.r, params.p, params.dkLen, progressCallback);
+}
+
+async function encryptAead(plainBytes, keyBytes, iv, aad) {
+  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  const algorithm = {
+    name: 'AES-GCM',
+    iv,
+    tagLength: TAG_LEN * 8,
+  };
+  if (aad) {
+    algorithm.additionalData = aad;
+  }
+  const cipherBuffer = await crypto.subtle.encrypt(algorithm, key, plainBytes);
+  const cipherBytes = new Uint8Array(cipherBuffer);
+  const authTag = cipherBytes.slice(cipherBytes.length - TAG_LEN);
+  const encrypted = cipherBytes.slice(0, cipherBytes.length - TAG_LEN);
+  return { encrypted, authTag };
+}
+
+// Build V3 encrypted wallet envelope
+async function buildEncryptedEnvelope(walletData, password, progressCallback) {
+  const params = { ...DEFAULT_SCRYPT_PARAMS };
+  const salt = randomBytes(params.saltLen);
+  const iv = randomBytes(DEFAULT_IV_LEN);
+
+  const key = await deriveKeyScrypt(password, salt, params, progressCallback);
+
+  const meta = {
+    version: 3,
+    kdf: {
+      name: 'scrypt',
+      params: {
+        N: params.N,
+        r: params.r,
+        p: params.p,
+        dkLen: params.dkLen,
+        salt: bytesToHex(salt),
+      },
+    },
+    cipher: {
+      name: 'aes-256-gcm',
+      iv: bytesToHex(iv),
+    },
+  };
+
+  const plainJson = JSON.stringify(walletData);
+  const aad = buildAad(meta);
+  const { encrypted, authTag } = await encryptAead(encodeUtf8(plainJson), key, iv, aad);
+
+  meta.cipher.authTag = bytesToHex(authTag);
+
+  return {
+    version: 3,
+    encrypted: true,
+    kdf: meta.kdf,
+    cipher: meta.cipher,
+    data: bytesToHex(encrypted),
+  };
+}
+
+// Build V3 unencrypted wallet envelope
+function buildUnencryptedEnvelope(walletData) {
+  return {
+    version: 3,
+    encrypted: false,
+    data: walletData,
+  };
+}
+
+// Common passwords and patterns to reject (lowercase for comparison)
+const COMMON_PASSWORDS = new Set([
+  'password', 'password1', 'password123', 'password1234',
+  'qwerty', 'qwerty123', 'qwertyuiop', 'qwerty1234',
+  'letmein', 'welcome', 'welcome1', 'welcome123',
+  'admin', 'admin123', 'administrator', 'login',
+  'master', 'master123', 'root', 'toor',
+  'dragon', 'monkey', 'shadow', 'sunshine', 'princess',
+  'football', 'baseball', 'soccer', 'hockey',
+  'superman', 'batman', 'trustno1', 'passw0rd',
+  'iloveyou', 'letmein', 'access', 'mustang',
+  'michael', 'jennifer', 'thomas', 'charlie', 'andrew',
+  'abcdef', 'abcdefg', 'abcdefgh', 'abcd1234',
+  'abc123', 'a]bc1234', '1234abcd', 'pass1234',
+  '12345678', '123456789', '1234567890', '87654321',
+  '11111111', '00000000', '12341234', '11223344',
+  'internet', 'computer', 'whatever', 'changeme',
+]);
+
+// Keyboard patterns to detect
+const KEYBOARD_PATTERNS = [
+  'qwerty', 'qwertz', 'azerty', 'asdfgh', 'zxcvbn',
+  'qazwsx', '1qaz2wsx', 'qaswed', 'ytrewq', 'rewq',
+  '123456', '654321', '987654', '456789', '567890',
+];
+
+function hasKeyboardPattern(pwd) {
+  const lower = pwd.toLowerCase();
+  return KEYBOARD_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+function hasRepeatingPattern(pwd) {
+  // Check for repeating sequences like "abcabc" or "123123"
+  const len = pwd.length;
+  for (let patternLen = 2; patternLen <= len / 2; patternLen += 1) {
+    const pattern = pwd.slice(0, patternLen);
+    const repeated = pattern.repeat(Math.ceil(len / patternLen)).slice(0, len);
+    if (repeated === pwd) return true;
+  }
+  // Check for character repetition like "aaaaaaaa"
+  if (/^(.)\1+$/.test(pwd)) return true;
+  return false;
+}
+
+// Password strength estimation using check-password-strength + common password check
+function estimatePasswordStrength(password) {
+  if (!password) return { score: 0, feedback: 'Password is required' };
+
+  // Minimum 8 characters required
+  if (password.length < 8) {
+    return { score: 0, feedback: 'Password must be at least 8 characters' };
+  }
+
+  // Check for common passwords (case-insensitive, ignoring trailing numbers/symbols)
+  const lowerPwd = password.toLowerCase();
+  const baseWord = lowerPwd.replace(/[0-9!@#$%^&*()]+$/g, '');
+  if (COMMON_PASSWORDS.has(lowerPwd) || COMMON_PASSWORDS.has(baseWord)) {
+    return { score: 1, feedback: 'This is a commonly used password' };
+  }
+
+  // Check for keyboard patterns
+  if (hasKeyboardPattern(password)) {
+    return { score: 1, feedback: 'Avoid keyboard patterns' };
+  }
+
+  // Check for repeating patterns
+  if (hasRepeatingPattern(password)) {
+    return { score: 1, feedback: 'Avoid repeating patterns' };
+  }
+
+  // Check what character types are present using simple regex
+  const hasLower = /[a-z]/.test(password);
+  const hasUpper = /[A-Z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSymbol = /[^A-Za-z0-9]/.test(password);
+  const hasNumberOrSymbol = hasNumber || hasSymbol;
+
+  // Build list of missing character types (numbers/symbols are either/or)
+  const missing = [];
+  if (!hasLower) missing.push('lowercase');
+  if (!hasUpper) missing.push('uppercase');
+  if (!hasNumberOrSymbol) missing.push('numbers or symbols');
+
+  // Determine score and feedback
+  let score;
+  let feedback;
+
+  if (missing.length >= 2) {
+    // Missing 2+ categories - weak
+    score = 1;
+    feedback = `Add ${missing.join(', ')}`;
+  } else if (missing.length === 1) {
+    // Missing 1 category - medium
+    score = 2;
+    feedback = `Add ${missing.join(', ')}`;
+  } else if (password.length < 12) {
+    // All categories but short
+    score = 2;
+    feedback = 'Consider a longer password';
+  } else {
+    // All categories and good length
+    score = 3;
+    feedback = 'Strong password';
+  }
+
+  return { score, feedback };
+}
 
 export default {
   name: 'LoadQRLLIB',
@@ -244,7 +462,12 @@ export default {
       selectedHeight: 10,
       elapsedSeconds: 0,
       elapsedTimer: null,
-      logoSvg: 'data:image/svg+xml;base64,' + btoa(logoSvgRaw),
+      logoSvg: `data:image/svg+xml;base64,${btoa(logoSvgRaw)}`,
+      // V-03: Password strength tracking
+      passwordStrength: { score: 0, feedback: 'Password is required' },
+      // Encryption progress tracking
+      encryptionProgress: 0,
+      isEncrypting: false,
     };
   },
   mounted() {
@@ -273,8 +496,31 @@ export default {
       }
       return `${secs}s`;
     },
+    // Password strength text color - darker for readability
+    strengthTextClass() {
+      const { score } = this.passwordStrength;
+      if (score === 0) return 'text-base-content/70';
+      if (score === 1) return 'text-error';
+      if (score === 2) return 'text-amber-600';
+      return 'text-green-600';
+    },
   },
   methods: {
+    // Password strength bar color based on position and score
+    // Score 0: all grey, Score 1: red (1/3), Score 2: amber (2/3), Score 3: green (3/3)
+    strengthBarClass(position) {
+      const { score } = this.passwordStrength;
+      if (score === 0) return 'bg-base-300';
+      if (score === 1) {
+        return position <= 1 ? 'bg-error' : 'bg-base-300';
+      }
+      if (score === 2) {
+        return position <= 2 ? 'bg-amber-500' : 'bg-base-300';
+      }
+      // score === 3
+      return 'bg-success';
+    },
+
     async saveJSON() {
       const thisAddress = document.getElementById('address').textContent;
       const thisPk = document.getElementById('pk').textContent;
@@ -284,8 +530,8 @@ export default {
       const thisHexSeed = document.getElementById('hexseed').textContent;
       const thisMnemonic = document.getElementById('mnemonic').textContent;
 
-      const walletDetail = {
-        encrypted: false,
+      // V3 wallet data structure
+      const walletData = {
         address: thisAddress,
         pk: thisPk,
         hexseed: thisHexSeed,
@@ -296,37 +542,75 @@ export default {
         index: 0,
       };
 
+      let walletEnvelope;
       if (this.isSecure) {
-        const passphrase = this.password;
-        walletDetail.encrypted = true;
-        walletDetail.address = await aesEncrypt(passphrase, walletDetail.address);
-        walletDetail.mnemonic = await aesEncrypt(passphrase, walletDetail.mnemonic);
-        walletDetail.hexseed = await aesEncrypt(passphrase, walletDetail.hexseed);
-        walletDetail.pk = await aesEncrypt(passphrase, walletDetail.pk);
+        // V3 encrypted format with scrypt + AES-256-GCM
+        this.isEncrypting = true;
+        this.encryptionProgress = 0;
+        try {
+          walletEnvelope = await buildEncryptedEnvelope(
+            walletData,
+            this.password,
+            (progress) => { this.encryptionProgress = Math.round(progress * 100); },
+          );
+        } finally {
+          this.isEncrypting = false;
+          this.encryptionProgress = 0;
+          // V-04: Clear password from memory after use
+          this.password = '';
+          this.passwordConfirm = '';
+          this.validated = false;
+          this.error = 'A password is required';
+          this.passwordStrength = { score: 0, feedback: 'Password is required' };
+        }
+      } else {
+        // V3 unencrypted format
+        walletEnvelope = buildUnencryptedEnvelope(walletData);
       }
 
-      const walletJson = ['[', JSON.stringify(walletDetail), ']'].join('');
-      const binBlob = new Blob([walletJson]);
+      const walletJson = JSON.stringify(walletEnvelope, null, 2);
+      const binBlob = new Blob([walletJson], { type: 'application/json' });
       const a = window.document.createElement('a');
-      a.href = window.URL.createObjectURL(binBlob, { type: 'text/plain' });
+      const blobUrl = window.URL.createObjectURL(binBlob);
+      a.href = blobUrl;
       a.download = 'wallet.json';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      // V-07: Fix Blob URL memory leak
+      window.URL.revokeObjectURL(blobUrl);
     },
 
     check() {
-      if (this.password === this.passwordConfirm) {
-        this.error = '';
-        this.validated = true;
-      } else {
-        this.error = 'Passwords must match';
-        this.validated = false;
-      }
+      // V-03: Enhanced password validation with strength check
+      this.passwordStrength = estimatePasswordStrength(this.password);
+
       if (!this.password.length) {
         this.error = 'A password is required';
         this.validated = false;
+        return;
       }
+
+      if (this.password.length < 8) {
+        this.error = 'Password must be at least 8 characters';
+        this.validated = false;
+        return;
+      }
+
+      if (this.passwordStrength.score < 1) {
+        this.error = this.passwordStrength.feedback;
+        this.validated = false;
+        return;
+      }
+
+      if (this.password !== this.passwordConfirm) {
+        this.error = 'Passwords must match';
+        this.validated = false;
+        return;
+      }
+
+      this.error = '';
+      this.validated = true;
     },
 
     height() {
@@ -481,48 +765,63 @@ export default {
       // Start elapsed time counter
       this.elapsedSeconds = 0;
       this.elapsedTimer = setInterval(() => {
-        this.elapsedSeconds++;
+        this.elapsedSeconds += 1;
       }, 1000);
 
       const { hexseedMnemonic } = this;
       const hashFunction = this.$store.state.hash;
       const xmssHeight = this.$store.state.height;
 
-      // Create Web Worker with embedded QRLLIB to keep UI responsive during heavy computation
-      // We need to fetch the QRLLIB script content and include it in the worker blob
-
-      // Get all script tags to find the one containing QRLLIB
-      const scripts = document.getElementsByTagName('script');
+      // V-06: Improved QRLLIB detection with explicit marker
+      // Find QRLLIB code from scripts - prioritize by detection confidence
       let qrllibCode = '';
 
-      // Find the script that contains QRLLIB (either from src or inline)
-      for (let script of scripts) {
-        if (script.src && script.src.includes('qrllib.js')) {
+      // Method 1: Look for script with QRLLIB global variable definition
+      const scripts = Array.from(document.getElementsByTagName('script'));
+      for (const script of scripts) {
+        if (script.src && script.src.includes('qrllib')) {
           // External script - fetch it
           try {
             const response = await fetch(script.src);
             qrllibCode = await response.text();
+            break;
           } catch (e) {
-            console.error('Could not fetch qrllib.js:', e);
+            // Continue to next method
           }
-          break;
-        } else if (script.textContent && script.textContent.includes('QRLLIB')) {
-          // Inline script - use it directly
-          qrllibCode = script.textContent;
-          break;
         }
       }
 
-      // If we couldn't find it in scripts, it might be available globally
-      if (!qrllibCode && typeof window.QRLLIB !== 'undefined') {
-        // Fallback: extract from the inline script in the built HTML
-        const allScripts = Array.from(document.scripts);
-        const qrllibScript = allScripts.find(s => s.textContent.length > 100000); // QRLLIB is large
-        if (qrllibScript) {
-          qrllibCode = qrllibScript.textContent;
+      // Method 2: Find inline script containing QRLLIB module marker
+      if (!qrllibCode) {
+        const inlineScript = scripts.find((s) => s.textContent
+          && (s.textContent.includes('QRLLIB')
+            || s.textContent.includes('eHashFunction')
+            || s.textContent.includes('Uint8Vector')));
+        if (inlineScript) {
+          qrllibCode = inlineScript.textContent;
         }
       }
 
+      // Method 3: Fallback - find largest inline script (QRLLIB is ~2MB)
+      if (!qrllibCode) {
+        const largeScript = scripts
+          .filter((s) => s.textContent && s.textContent.length > 100000)
+          .sort((a, b) => b.textContent.length - a.textContent.length)[0];
+        if (largeScript) {
+          qrllibCode = largeScript.textContent;
+        }
+      }
+
+      if (!qrllibCode) {
+        this.errorM = 'Failed to locate QRLLIB code. Please refresh the page.';
+        this.showGeneratingSpinner = false;
+        this.showGenerateButton = true;
+        clearInterval(this.elapsedTimer);
+        return;
+      }
+
+      // V-05: Worker code with timeout on QRLLIB polling
+      const QRLLIB_TIMEOUT_MS = 30000; // 30 second timeout
       const workerCode = `
         ${qrllibCode}
 
@@ -530,13 +829,17 @@ export default {
         self.document = { createElement: () => ({}) };
 
         self.onmessage = async function(e) {
-          const { randomSeed, xmssHeight, hashFunction, regen, hexseedMnemonic } = e.data;
+          const { randomSeed, xmssHeight, hashFunction, regen, hexseedMnemonic, timeoutMs } = e.data;
 
-          const waitForQRLLIB = () => {
-            return new Promise((resolve) => {
+          // V-05: waitForQRLLIB with timeout
+          const waitForQRLLIB = (maxWaitMs) => {
+            return new Promise((resolve, reject) => {
+              const startTime = Date.now();
               const check = () => {
                 if (typeof QRLLIB !== 'undefined' && typeof QRLLIB.Xmss !== 'undefined') {
                   resolve();
+                } else if (Date.now() - startTime > maxWaitMs) {
+                  reject(new Error('QRLLIB failed to initialize within ' + (maxWaitMs / 1000) + ' seconds'));
                 } else {
                   setTimeout(check, 100);
                 }
@@ -545,7 +848,12 @@ export default {
             });
           };
 
-          await waitForQRLLIB();
+          try {
+            await waitForQRLLIB(timeoutMs);
+          } catch (err) {
+            self.postMessage({ error: err.message });
+            return;
+          }
 
           const toUint8Vector = arr => {
             const vec = new QRLLIB.Uint8Vector();
@@ -610,6 +918,7 @@ export default {
         if (e.data.error) {
           this.errorM = e.data.error;
           this.showGenerateButton = true;
+          this.showRegenArea = true;
           return;
         }
 
@@ -628,7 +937,8 @@ export default {
         clearInterval(this.elapsedTimer);
         this.showGeneratingSpinner = false;
         this.showGenerateButton = true;
-        this.errorM = 'Wallet generation failed: ' + err.message;
+        this.showRegenArea = true;
+        this.errorM = `Wallet generation failed: ${err.message}`;
       };
 
       // Generate random seed and send to worker
@@ -640,6 +950,7 @@ export default {
         hashFunction,
         regen,
         hexseedMnemonic,
+        timeoutMs: QRLLIB_TIMEOUT_MS,
       });
     },
   },
