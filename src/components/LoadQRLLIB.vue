@@ -8,7 +8,7 @@
         <div id="loading" v-show="!qrllibLoaded">
           <div class="flex flex-col items-center gap-2">
             <p class="text-primary">Loading QRL Library...</p>
-            <p class="text-base-content/60 text-sm">qrllib v1.2.4</p>
+            <p class="text-base-content/60 text-sm">qrllib v1.2.6</p>
             <span class="loading loading-spinner loading-lg text-primary"></span>
           </div>
         </div>
@@ -46,6 +46,8 @@
               <button class="btn btn-primary" @click="generateWallet(false)">Generate</button>
             </div>
           </div>
+
+          <p v-if="errorM" role="alert" class="text-error text-center mt-4">{{ errorM }}</p>
 
           <!-- Generating Spinner -->
           <div id="generatingSpinner" v-show="showGeneratingSpinner" class="mt-8">
@@ -181,7 +183,6 @@
             <div class="flex justify-center mt-4">
               <button class="btn btn-primary" @click="generateWallet(true)">Regenerate</button>
             </div>
-            <p v-if="errorM" class="text-error text-center mt-2">{{ errorM }}</p>
           </div>
         </div>
       </div>
@@ -195,6 +196,8 @@
 import { jsPDF } from 'jspdf';
 import print from 'print-js';
 import logoSvgRaw from '/logo.svg?raw';
+import WalletWorker from '../wallet-worker.js?worker&inline';
+import { getSecureRandomSeed, SECURE_RANDOM_ERROR } from '../secure-random.js';
 
 // Browser-compatible AES-256-CTR encryption (matches aes256 npm package format)
 const aesEncrypt = async (password, plaintext) => {
@@ -473,6 +476,16 @@ export default {
     },
 
     async generateWallet(regen) {
+      let randomSeed = [];
+      if (!regen) {
+        try {
+          randomSeed = Array.from(getSecureRandomSeed());
+        } catch (error) {
+          this.errorM = error.message || SECURE_RANDOM_ERROR;
+          return;
+        }
+      }
+
       this.showGenerateButton = false;
       this.showGeneratingSpinner = true;
       this.showRegenArea = false;
@@ -488,122 +501,10 @@ export default {
       const hashFunction = this.$store.state.hash;
       const xmssHeight = this.$store.state.height;
 
-      // Create Web Worker with embedded QRLLIB to keep UI responsive during heavy computation
-      // We need to fetch the QRLLIB script content and include it in the worker blob
-
-      // Get all script tags to find the one containing QRLLIB
-      const scripts = document.getElementsByTagName('script');
-      let qrllibCode = '';
-
-      // Find the script that contains QRLLIB (either from src or inline)
-      for (let script of scripts) {
-        if (script.src && script.src.includes('qrllib.js')) {
-          // External script - fetch it
-          try {
-            const response = await fetch(script.src);
-            qrllibCode = await response.text();
-          } catch (e) {
-            console.error('Could not fetch qrllib.js:', e);
-          }
-          break;
-        } else if (script.textContent && script.textContent.includes('QRLLIB')) {
-          // Inline script - use it directly
-          qrllibCode = script.textContent;
-          break;
-        }
-      }
-
-      // If we couldn't find it in scripts, it might be available globally
-      if (!qrllibCode && typeof window.QRLLIB !== 'undefined') {
-        // Fallback: extract from the inline script in the built HTML
-        const allScripts = Array.from(document.scripts);
-        const qrllibScript = allScripts.find(s => s.textContent.length > 100000); // QRLLIB is large
-        if (qrllibScript) {
-          qrllibCode = qrllibScript.textContent;
-        }
-      }
-
-      const workerCode = `
-        ${qrllibCode}
-
-        self.window = self;
-        self.document = { createElement: () => ({}) };
-
-        self.onmessage = async function(e) {
-          const { randomSeed, xmssHeight, hashFunction, regen, hexseedMnemonic } = e.data;
-
-          const waitForQRLLIB = () => {
-            return new Promise((resolve) => {
-              const check = () => {
-                if (typeof QRLLIB !== 'undefined' && typeof QRLLIB.Xmss !== 'undefined') {
-                  resolve();
-                } else {
-                  setTimeout(check, 100);
-                }
-              };
-              check();
-            });
-          };
-
-          await waitForQRLLIB();
-
-          const toUint8Vector = arr => {
-            const vec = new QRLLIB.Uint8Vector();
-            for (let i = 0; i < arr.length; i += 1) {
-              vec.push_back(arr[i]);
-            }
-            return vec;
-          };
-
-          let hashFn = QRLLIB.eHashFunction.SHAKE_128;
-          switch (hashFunction) {
-            case 'SHAKE_128':
-              hashFn = QRLLIB.eHashFunction.SHAKE_128;
-              break;
-            case 'SHAKE_256':
-              hashFn = QRLLIB.eHashFunction.SHAKE_256;
-              break;
-            case 'SHA2_256':
-              hashFn = QRLLIB.eHashFunction.SHA2_256;
-              break;
-          }
-
-          try {
-            let XMSS_OBJECT = null;
-
-            if (!regen) {
-              const seedVector = toUint8Vector(new Uint8Array(randomSeed));
-              XMSS_OBJECT = await new QRLLIB.Xmss.fromParameters(seedVector, xmssHeight, hashFn);
-            } else {
-              if (hexseedMnemonic.trim().length === 102) {
-                XMSS_OBJECT = QRLLIB.Xmss.fromHexSeed(hexseedMnemonic);
-              } else if (hexseedMnemonic.trim().split(' ').length === 34) {
-                XMSS_OBJECT = QRLLIB.Xmss.fromMnemonic(hexseedMnemonic.trim());
-              } else {
-                self.postMessage({ error: 'Invalid hexseed/mnemonic' });
-                return;
-              }
-            }
-
-            self.postMessage({
-              address: XMSS_OBJECT.getAddress(),
-              pk: XMSS_OBJECT.getPK(),
-              hexseed: XMSS_OBJECT.getHexSeed(),
-              mnemonic: XMSS_OBJECT.getMnemonic(),
-            });
-          } catch (err) {
-            self.postMessage({ error: err.message || 'Wallet generation failed' });
-          }
-        };
-      `;
-
-      const blob = new Blob([workerCode], { type: 'application/javascript' });
-      const workerUrl = URL.createObjectURL(blob);
-      const worker = new Worker(workerUrl);
+      const worker = new WalletWorker();
 
       worker.onmessage = (e) => {
         worker.terminate();
-        URL.revokeObjectURL(workerUrl);
         clearInterval(this.elapsedTimer);
         this.showGeneratingSpinner = false;
 
@@ -624,15 +525,11 @@ export default {
 
       worker.onerror = (err) => {
         worker.terminate();
-        URL.revokeObjectURL(workerUrl);
         clearInterval(this.elapsedTimer);
         this.showGeneratingSpinner = false;
         this.showGenerateButton = true;
         this.errorM = 'Wallet generation failed: ' + err.message;
       };
-
-      // Generate random seed and send to worker
-      const randomSeed = Array.from(crypto.getRandomValues(new Uint8Array(48)));
 
       worker.postMessage({
         randomSeed,
