@@ -7,13 +7,14 @@
     "build": "vite build && npm run postbuild",
     "postbuild": "cd dist && find . -type f ! -name 'index.html' -delete",
     "serve": "vite preview",
+    "test": "node --test",
     "postinstall": "cp -r node_modules/@theqrl/qrllib-browserify/dist/qrllib.js public/qrllib.js"
   },
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "6.7.2",
     "@fortawesome/free-solid-svg-icons": "6.7.2",
     "@fortawesome/vue-fontawesome": "3.0.8",
-    "@theqrl/qrllib-browserify": "1.0.0",
+    "@theqrl/qrllib-browserify": "1.1.0",
     "buffer": "6.0.3",
     "jspdf": "2.5.2",
     "print-js": "1.6.0",
