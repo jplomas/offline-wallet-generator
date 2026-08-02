@@ -1,14 +1,16 @@
 export const SECURE_RANDOM_ERROR =
   'This browser has no secure random number generator. Wallet generation cannot continue safely.';
 
-export function getSecureRandomSeed(cryptoObject = globalThis.crypto) {
-  if (!cryptoObject || typeof cryptoObject.getRandomValues !== 'function') {
+export function getSecureRandomSeed(cryptoObject) {
+  const cryptoSource = arguments.length === 0 ? globalThis.crypto : cryptoObject;
+
+  if (!cryptoSource || typeof cryptoSource.getRandomValues !== 'function') {
     throw new Error(SECURE_RANDOM_ERROR);
   }
 
   let seed;
   try {
-    seed = cryptoObject.getRandomValues(new Uint8Array(48));
+    seed = cryptoSource.getRandomValues(new Uint8Array(48));
   } catch {
     throw new Error(SECURE_RANDOM_ERROR);
   }
