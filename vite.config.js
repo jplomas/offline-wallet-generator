@@ -4,6 +4,10 @@ import { resolve } from 'path'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 import { readFileSync } from 'fs'
 
+// Read version from package.json
+const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'))
+const buildDate = new Date().toISOString().split('T')[0] // YYYY-MM-DD format
+
 // Custom plugin to inline public assets
 function inlinePublicAssets() {
   return {
@@ -42,6 +46,8 @@ export default defineConfig({
   },
   define: {
     global: 'globalThis',
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __BUILD_DATE__: JSON.stringify(buildDate),
   },
   optimizeDeps: {
     include: ['buffer'],
