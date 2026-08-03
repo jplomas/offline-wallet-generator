@@ -4,23 +4,14 @@
 
 # QRL Offline Wallet Generator
 
+Use the [deployed wallet](https://offline-wallet-generator.theqrl.org), or for an air-gapped workflow download the latest signed, single-file [offline release](https://github.com/theQRL/offline-wallet-generator/releases/latest).
+
 ## Use (the quick version)
 
-- Download the latest **qrl-offline-wallet.zip** [release](https://github.com/theQRL/offline-wallet-generator/releases)
-- Unarchive
-
-**Either**:
-
-- Open offline.html in a modern browser (one which [supports webassembly](https://caniuse.com/#feat=wasm))
-
-**or**:
-
-- Run a local web server pointing to the index.html file, eg:
-
-```
-npm i -g http-server
-http-server offline-wallet-generator/
-```
+- Download the latest **qrl-offline-wallet-&lt;version&gt;.html** and its `.sha256` file from [GitHub Releases](https://github.com/theQRL/offline-wallet-generator/releases/latest)
+- Verify the checksum as described on the release page
+- Disconnect the machine from the network
+- Open the HTML file in a modern browser (one which [supports WebAssembly](https://caniuse.com/#feat=wasm)); no server or install is required
 
 **then**:
 
@@ -42,7 +33,7 @@ Help is available:
 gpg --verify shasum.256.pgp.asc
 ```
 - This should display _gpg: Good signature from "Security team <security@theqrl.org>"_
-- From downloaded qrl-offline-wallet.zip, check the shasum of the index of shasums:
+- From the downloaded offline wallet, check the shasum of the index of shasums:
 ```
 shasum shasum.256.asc
 ```
@@ -102,11 +93,20 @@ npm install
 npm run serve
 ```
 
-### Compiles and minifies for production
+### Build the hosted site
 
 ```bash
 npm run build
 ```
+
+### Build and check the single-file offline release
+
+```bash
+npm run build:offline
+npm run check:offline
+```
+
+See [RELEASE.md](RELEASE.md) for the signed-tag release process.
 
 ### Run tests
 
