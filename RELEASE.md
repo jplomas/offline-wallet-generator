@@ -129,14 +129,24 @@ COMMIT_REF=<40-char commit sha> npm run build:offline
 **Use the Node version in `.nvmrc`.** Node 22 and 24 currently produce
 identical output, but that is verified rather than guaranteed.
 
-**Cross-platform status, measured on 2026-08-03:** Linux and macOS produce
-**byte-identical** artefacts, despite the CSS pipeline using platform-specific
-native binaries (`lightningcss`, `@tailwindcss/oxide`) — so a mismatch on
-either is meaningful. Windows differed by 70 bytes, caused by git checking out
-text files as CRLF rather than by the toolchain; `.gitattributes` now pins the
-working tree to LF everywhere. That fix is pending confirmation on a Windows
-runner, so until it is confirmed, treat a Windows mismatch as inconclusive and
-use check 2 there.
+**Rebuild verification works on Linux, macOS and Windows.** Measured on
+2026-08-03: all three produced a byte-identical artefact from the same commit,
+so a digest mismatch on any of them is meaningful and should be treated as a
+real signal rather than a platform quirk.
+
+Two things make that hold, and both are load-bearing:
+
+- `.gitattributes` pins the working tree to LF. Windows otherwise checks out
+  text files as CRLF and those carriage returns reach the artefact — it
+  differed by exactly 70 bytes before this was added.
+- The CSS pipeline uses platform-specific native binaries (`lightningcss`,
+  `@tailwindcss/oxide`), which was the obvious suspect for divergence and
+  turned out not to be one. If either is upgraded, re-check across platforms
+  rather than assuming.
+
+CI builds the artefact twice on every push and fails on a digest mismatch, so
+the single-platform half of this is continuously tested. The cross-platform
+half was a one-off measurement — worth repeating after a toolchain change.
 
 CI runs the offline build twice on every push and fails if the two digests
 differ, so the instruction above is continuously tested rather than assumed.
