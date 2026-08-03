@@ -1,23 +1,34 @@
-# TEMPORARY — DELETE AFTER ONE RUN.
+# TEMPORARY — DELETE AFTER THE SECOND RUN (see below).
 #
 # Purpose: settle a single open question from the 2026-08 security review.
-# RELEASE.md currently tells users that byte-for-byte rebuild verification is
+# RELEASE.md told users that byte-for-byte rebuild verification was
 # "confirmed on Linux x64 only", because the CSS pipeline uses platform-specific
 # native binaries (lightningcss, @tailwindcss/oxide) and nobody had measured
 # whether they produce identical output across platforms.
 #
-# This workflow builds the offline artefact on ubuntu, macos and windows and
-# compares the digests. Read the summary table in the run, then:
+# FIRST RUN — 2026-08-03, run 30834055808. Result:
 #
-#   - All three digests match  -> delete the "Linux x64 only" caveat from
-#                                 RELEASE.md and this file.
-#   - Digests differ           -> keep the caveat, record WHICH platforms
-#                                 diverge and by how many bytes, and delete
-#                                 this file.
+#   ubuntu-latest  db322b6e…  2109510 bytes  \ byte-identical
+#   macos-latest   db322b6e…  2109510 bytes  /
+#   windows-latest be61707d…  2109580 bytes    +70 bytes, first diff at char 16
 #
-# Either way this file goes. It exists to produce evidence once, not to run
-# forever: it triples CI cost on every push for a fact that changes only when
-# the CSS toolchain does.
+# The cause was NOT the native CSS binaries, which was the original worry —
+# Linux and macOS agreeing rules that out. It was git checking out text files
+# as CRLF on Windows (`<!DOCTYPE html>\r\n` against `\n`), those carriage
+# returns flowing through into the artefact. `.gitattributes` now pins the
+# working tree to LF on every platform.
+#
+# SECOND RUN — the only thing left to do. Dispatch this once more with
+# .gitattributes committed. Then:
+#
+#   - All three match -> drop the Windows caveat from RELEASE.md, delete this
+#                        file.
+#   - Windows still differs -> record the new delta, keep the caveat, delete
+#                        this file anyway and open an issue.
+#
+# Either way this file goes after that run. It exists to produce evidence
+# twice, not to run forever: it triples CI cost for a fact that changes only
+# when the toolchain or checkout behaviour does.
 
 name: TEMPORARY cross-platform reproducibility
 
@@ -96,6 +107,9 @@ jobs:
       - name: Report
         shell: bash
         run: |
+          # Written to the log as well as the job summary. The first run put it
+          # only in the summary, which meant the digests had to be recovered by
+          # downloading the artefacts to find out what happened.
           {
             echo "## Cross-platform reproducibility"
             echo ""
@@ -108,11 +122,11 @@ jobs:
               echo "| $name | \`$digest\` | $size |"
             done
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
           count=$(find artefacts -name index.html -exec sha256sum {} \; | awk '{print $1}' | sort -u | wc -l)
           if [ "$count" -eq 1 ]; then
-            echo "**All platforms produced an identical artefact.** Remove the 'Linux x64 only' caveat from RELEASE.md, then delete this workflow." >> "$GITHUB_STEP_SUMMARY"
+            echo "**All platforms produced an identical artefact.** Drop the Windows caveat from RELEASE.md, then delete this workflow." | tee -a "$GITHUB_STEP_SUMMARY"
           else
             base=$(find artefacts -name index.html | head -1)
             {
@@ -124,7 +138,7 @@ jobs:
                 echo "$(dirname "$f") vs $(dirname "$base"): $(cmp "$base" "$f" 2>&1 | head -1)"
               done
               echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           # Informational only — this job must not block the branch.
           exit 0

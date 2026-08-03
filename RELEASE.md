@@ -129,11 +129,14 @@ COMMIT_REF=<40-char commit sha> npm run build:offline
 **Use the Node version in `.nvmrc`.** Node 22 and 24 currently produce
 identical output, but that is verified rather than guaranteed.
 
-**Byte-for-byte rebuild verification is confirmed on Linux x64 only.** The CSS
-pipeline uses platform-specific native binaries (`lightningcss`,
-`@tailwindcss/oxide`) and releases are built on `ubuntu-latest`. Cross-platform
-reproducibility has not been established, so a digest mismatch on macOS or
-Windows is not by itself evidence of tampering. Use check 2 there.
+**Cross-platform status, measured on 2026-08-03:** Linux and macOS produce
+**byte-identical** artefacts, despite the CSS pipeline using platform-specific
+native binaries (`lightningcss`, `@tailwindcss/oxide`) — so a mismatch on
+either is meaningful. Windows differed by 70 bytes, caused by git checking out
+text files as CRLF rather than by the toolchain; `.gitattributes` now pins the
+working tree to LF everywhere. That fix is pending confirmation on a Windows
+runner, so until it is confirmed, treat a Windows mismatch as inconclusive and
+use check 2 there.
 
 CI runs the offline build twice on every push and fails if the two digests
 differ, so the instruction above is continuously tested rather than assumed.

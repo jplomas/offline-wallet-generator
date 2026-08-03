@@ -118,6 +118,9 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm audit --omit=dev --audit-level=low
+      # dist/ is needed by csp.spec.js below, which checks the shipped
+      # Content-Security-Policy against a real served deployment.
+      - run: npm run build
       - run: npm run build:offline
       - run: npm run check:offline
 
