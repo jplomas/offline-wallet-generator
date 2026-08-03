@@ -12,7 +12,7 @@
 
         <h3 class="font-semibold">Configuration Options:</h3>
         <ul class="list-disc list-inside space-y-1">
-          <li><strong>Hash Function:</strong> SHAKE_128 (default), SHAKE_256, or SHA2_256</li>
+          <li><strong>Hash Function:</strong> SHAKE_256 (default), SHAKE_128, or SHA2_256</li>
           <li><strong>Tree Height:</strong> Determines the number of signatures available (default: 10 = 1,024 signatures)</li>
         </ul>
         <p>The defaults are suitable for most users. Higher tree heights provide more signatures but take longer to generate. Read more at <a class="link link-primary" href="https://docs.theqrl.org/wallet/basics/#qrl-web-wallet">the QRL docs site</a>.</p>

@@ -1,4 +1,10 @@
 name: Release offline wallet
+
+# Publishes the single-file offline artefact users are told to download,
+# verify, and take to an air-gapped machine. Everything in this file exists to
+# make "the file on the releases page is built from the tagged source, by an
+# authorised maintainer" a checkable claim rather than an assertion.
+
 on:
   push:
     tags: ['v*']
@@ -7,34 +13,122 @@ on:
       tag:
         description: Existing signed tag to publish
         required: true
+
+# Read-only by default. Only the publishing job widens this.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
+    name: Build and publish offline artefact
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release and upload assets
+      id-token: write # mint the OIDC token that signs build provenance
+      attestations: write # record the provenance attestation
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # Tag names reach a shell below. Git permits ; $( ) ` && | in a refname,
+      # so validate the shape before anything else runs, and bind the value
+      # through env rather than interpolating ${{ }} into a run: body — an
+      # expression is substituted before the shell parses the script, which
+      # makes the tag name part of the program.
+      - name: Validate tag shape
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Refusing tag '$TAG': expected vMAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::Refusing tag '$TAG': expected vMAJOR.MINOR.PATCH"; exit 1; }
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
-      - name: Verify signed annotated tag
+          # Do not leave the job token in .git/config, where any dependency
+          # lifecycle script running under npm ci could read it.
+          persist-credentials: false
+
+      # The previous version of this step grepped the tag object for
+      # 'BEGIN (PGP|SSH) SIGNATURE'. A tag whose *message body* contains that
+      # text passed while `git verify-tag` failed. Verify for real, against a
+      # committed allowlist — a hosted runner has an empty keyring, so
+      # verification without an explicit import cannot succeed at all.
+      - name: Verify tag signature against maintainer allowlist
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          git cat-file tag "$TAG" >/dev/null 2>&1 || { echo "::error::$TAG must be an annotated tag"; exit 1; }
-          git cat-file tag "$TAG" | grep -qE 'BEGIN (PGP|SSH) SIGNATURE' || { echo "::error::$TAG is not signed"; exit 1; }
-      - name: Verify tag version
+          # Count real entries, not bytes. A file of comments with the keys
+          # still to be filled in is non-empty, so a `[ -s ]` check would pass
+          # it and fail later with "No principal matched" — an error that reads
+          # as though the tag were at fault rather than the allowlist being
+          # unpopulated.
+          count_entries() {
+            [ -f "$1" ] || { echo 0; return; }
+            grep -cvE '^[[:space:]]*(#|$)' "$1" || true
+          }
+          pgp_keys=$(count_entries .github/maintainer-keys.asc)
+          ssh_keys=$(count_entries .github/allowed-signers)
+
+          if [ "$pgp_keys" -eq 0 ] && [ "$ssh_keys" -eq 0 ]; then
+            echo "::error::No maintainer keys configured. Add real keys to .github/allowed-signers (SSH, one 'principal ssh-ed25519 AAAA...' line per key) or .github/maintainer-keys.asc (PGP) — see RELEASE.md. A file containing only comments does not count."
+            exit 1
+          fi
+          echo "allowlist entries: $ssh_keys SSH, $pgp_keys PGP"
+
+          verified=0
+          if [ "$pgp_keys" -gt 0 ]; then
+            gpg --batch --quiet --import .github/maintainer-keys.asc
+            if git verify-tag "$TAG" 2>/dev/null; then verified=1; fi
+          fi
+          if [ "$verified" = 0 ] && [ "$ssh_keys" -gt 0 ]; then
+            git config gpg.ssh.allowedSignersFile .github/allowed-signers
+            if git -c gpg.format=ssh verify-tag "$TAG" 2>/dev/null; then verified=1; fi
+          fi
+
+          if [ "$verified" != 1 ]; then
+            echo "::error::$TAG is not signed by a key in the maintainer allowlist"
+            git verify-tag "$TAG" || true
+            exit 1
+          fi
+          echo "$TAG verified against the maintainer allowlist"
+
+      - name: Verify tag version matches package.json
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION=$(node -p "require('./package.json').version")
           [ "${TAG#v}" = "$VERSION" ] || { echo "::error::$TAG does not match package version $VERSION"; exit 1; }
-      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version-file: .nvmrc
-          cache: npm
+          # No `cache: npm` here, deliberately. The npm cache is shared with
+          # ci.yml, which runs on every branch — so a cache entry reaching the
+          # release job would have been written by a far more permissive
+          # workflow. Lockfile integrity makes substitution hard, but a release
+          # runs rarely and the seconds saved are not worth the shared state.
       - run: npm ci
+      - run: npm run lint
       - run: npm test
+      - run: npm audit --omit=dev --audit-level=low
       - run: npm run build:offline
       - run: npm run check:offline
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      # Proves the published bytes cannot reach the network, by loading them
+      # with the network denied. The static gate above bounds the text; this
+      # bounds the behaviour.
+      - run: npm run test:browser
+
       - name: Name and hash artefact
         id: artefact
         run: |
@@ -43,11 +137,29 @@ jobs:
           mv dist-offline/index.html "$NAME"
           sha256sum "$NAME" > "$NAME.sha256"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191
+
+      # The .sha256 is generated by this job, so on its own it proves only that
+      # the download arrived intact. The attestation is what ties the bytes to
+      # this repository, this workflow and this commit; users verify it with
+      # `gh attestation verify <file> --repo theQRL/offline-wallet-generator`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
-          files: |
-            ${{ steps.artefact.outputs.name }}
-            ${{ steps.artefact.outputs.name }}.sha256
-          fail_on_unmatched_files: true
+          subject-path: ${{ steps.artefact.outputs.name }}
+
+      # Uses the runner's built-in gh rather than a third-party action. The
+      # action previously used here was pinned to a 2024 release and held
+      # contents: write — the most sensitive step in the pipeline was also its
+      # last unnecessary supply-chain dependency.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          NAME: ${{ steps.artefact.outputs.name }}
+        run: |
+          test -f "$NAME" || { echo "::error::$NAME missing"; exit 1; }
+          test -f "$NAME.sha256" || { echo "::error::$NAME.sha256 missing"; exit 1; }
+          gh release create "$TAG" "$NAME" "$NAME.sha256" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag

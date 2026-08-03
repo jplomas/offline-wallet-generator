@@ -8,7 +8,7 @@
         <div id="loading" v-show="!qrllibLoaded">
           <div class="flex flex-col items-center gap-2">
             <p class="text-primary">Loading QRL Library...</p>
-            <p class="text-base-content/60 text-sm">qrllib v1.2.6</p>
+            <p class="text-base-content/60 text-sm">qrllib v{{ qrllibVersion }}</p>
             <span class="loading loading-spinner loading-lg text-primary"></span>
           </div>
         </div>
@@ -123,14 +123,21 @@
             <div v-if="isSecure" class="space-y-4">
               <div class="form-control w-full max-w-md mx-auto">
                 <label class="label">
-                  <span class="label-text">Password (min 8 characters)</span>
+                  <span class="label-text">Password (min {{ minPasswordLength }} characters, weak passwords are rejected)</span>
                 </label>
+                <!-- "new-password" stops a manager autofilling an unrelated
+                     stored credential over the wallet password. Managers are
+                     deliberately NOT suppressed here: forgetting this password
+                     loses the wallet, so saving it is a reasonable user
+                     choice. That is the opposite of the seed field above. -->
                 <input
                   type="password"
                   v-model="password"
                   v-on:input="check"
                   class="input input-bordered w-full focus:input-secondary focus:border-secondary"
                   placeholder="Enter password"
+                  autocomplete="new-password"
+                  spellcheck="false"
                 />
                 <!-- Password strength indicator -->
                 <div v-if="password.length > 0" class="mt-2">
@@ -154,6 +161,8 @@
                   v-on:input="check"
                   class="input input-bordered w-full focus:input-secondary focus:border-secondary"
                   placeholder="Confirm password"
+                  autocomplete="new-password"
+                  spellcheck="false"
                 />
               </div>
               <p v-if="error" class="text-error text-center text-sm">{{ error }}</p>
@@ -194,10 +203,27 @@
             <div class="divider">Or Regenerate from Existing</div>
             <div class="flex flex-col items-center gap-1 max-w-lg mx-auto">
               <span class="text-sm font-medium">Enter hexseed or mnemonic</span>
+              <!-- Deliberately not masked: a 34-word mnemonic has to be
+                   readable to be checked, and a mistyped seed silently derives
+                   a *different valid wallet* rather than erroring. The real
+                   risks here are the browser storing or transmitting the seed,
+                   which the attributes below close.
+                   spellcheck="false" is the important one — Chromium's
+                   enhanced spellcheck sends field contents to a remote service.
+                   autocorrect/autocapitalize would mangle wordlist words.
+                   The data-* attributes stop password managers offering to
+                   save seed material to disk. -->
               <textarea
                 v-model="hexseedMnemonic"
                 class="textarea textarea-bordered w-full h-24 focus:textarea-secondary focus:border-secondary"
                 placeholder="Enter your hexseed or mnemonic phrase..."
+                spellcheck="false"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                data-1p-ignore
+                data-lpignore="true"
+                data-bwignore
               ></textarea>
             </div>
             <div class="flex justify-center mt-4">
@@ -211,238 +237,21 @@
 </template>
 
 <script>
-/* eslint new-cap:0, import/order:0 */
-/* global QRLLIB */
+/* eslint new-cap:0 */
 import { jsPDF } from 'jspdf';
 import print from 'print-js';
-import { scrypt } from 'scrypt-js';
 import logoSvgRaw from '/logo.svg?raw';
 import WalletWorker from '../wallet-worker.js?worker&inline';
 import { getSecureRandomSeed, SECURE_RANDOM_ERROR } from '../secure-random.js';
+import { validatePassword, MINIMUM_PASSWORD_LENGTH } from '../password-policy.js';
+import { buildEncryptedEnvelope, buildUnencryptedEnvelope } from '../wallet-envelope.js';
 
-// V3 Wallet Format - Strong KDF with authenticated encryption
-// Uses scrypt (N=2^17, r=8, p=1) + AES-256-GCM
-// Addresses V-01 (Weak KDF) and V-02 (No AEAD) from security audit
-
-const DEFAULT_SCRYPT_PARAMS = {
-  N: 1 << 17, // 131072 - strong work factor
-  r: 8,
-  p: 1,
-  dkLen: 32,
-  saltLen: 32,
+const HTML_ESCAPES = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 };
 
-const DEFAULT_IV_LEN = 12;
-const TAG_LEN = 16;
-
-function randomBytes(length) {
-  const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
-  return bytes;
-}
-
-function bytesToHex(bytes) {
-  let hex = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    const value = bytes[i].toString(16);
-    hex += value.length === 1 ? `0${value}` : value;
-  }
-  return hex;
-}
-
-function encodeUtf8(text) {
-  return new TextEncoder().encode(text);
-}
-
-function buildAad(meta) {
-  return encodeUtf8(JSON.stringify({
-    version: meta.version,
-    kdf: meta.kdf,
-    cipher: {
-      name: meta.cipher.name,
-      iv: meta.cipher.iv,
-    },
-  }));
-}
-
-async function deriveKeyScrypt(password, salt, params, progressCallback) {
-  const passwordBytes = typeof password === 'string' ? encodeUtf8(password) : new Uint8Array(password);
-  return scrypt(passwordBytes, salt, params.N, params.r, params.p, params.dkLen, progressCallback);
-}
-
-async function encryptAead(plainBytes, keyBytes, iv, aad) {
-  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
-  const algorithm = {
-    name: 'AES-GCM',
-    iv,
-    tagLength: TAG_LEN * 8,
-  };
-  if (aad) {
-    algorithm.additionalData = aad;
-  }
-  const cipherBuffer = await crypto.subtle.encrypt(algorithm, key, plainBytes);
-  const cipherBytes = new Uint8Array(cipherBuffer);
-  const authTag = cipherBytes.slice(cipherBytes.length - TAG_LEN);
-  const encrypted = cipherBytes.slice(0, cipherBytes.length - TAG_LEN);
-  return { encrypted, authTag };
-}
-
-// Build V3 encrypted wallet envelope
-async function buildEncryptedEnvelope(walletData, password, progressCallback) {
-  const params = { ...DEFAULT_SCRYPT_PARAMS };
-  const salt = randomBytes(params.saltLen);
-  const iv = randomBytes(DEFAULT_IV_LEN);
-
-  const key = await deriveKeyScrypt(password, salt, params, progressCallback);
-
-  const meta = {
-    version: 3,
-    kdf: {
-      name: 'scrypt',
-      params: {
-        N: params.N,
-        r: params.r,
-        p: params.p,
-        dkLen: params.dkLen,
-        salt: bytesToHex(salt),
-      },
-    },
-    cipher: {
-      name: 'aes-256-gcm',
-      iv: bytesToHex(iv),
-    },
-  };
-
-  const plainJson = JSON.stringify(walletData);
-  const aad = buildAad(meta);
-  const { encrypted, authTag } = await encryptAead(encodeUtf8(plainJson), key, iv, aad);
-
-  meta.cipher.authTag = bytesToHex(authTag);
-
-  return {
-    version: 3,
-    encrypted: true,
-    kdf: meta.kdf,
-    cipher: meta.cipher,
-    data: bytesToHex(encrypted),
-  };
-}
-
-// Build V3 unencrypted wallet envelope
-function buildUnencryptedEnvelope(walletData) {
-  return {
-    version: 3,
-    encrypted: false,
-    data: walletData,
-  };
-}
-
-// Common passwords and patterns to reject (lowercase for comparison)
-const COMMON_PASSWORDS = new Set([
-  'password', 'password1', 'password123', 'password1234',
-  'qwerty', 'qwerty123', 'qwertyuiop', 'qwerty1234',
-  'letmein', 'welcome', 'welcome1', 'welcome123',
-  'admin', 'admin123', 'administrator', 'login',
-  'master', 'master123', 'root', 'toor',
-  'dragon', 'monkey', 'shadow', 'sunshine', 'princess',
-  'football', 'baseball', 'soccer', 'hockey',
-  'superman', 'batman', 'trustno1', 'passw0rd',
-  'iloveyou', 'letmein', 'access', 'mustang',
-  'michael', 'jennifer', 'thomas', 'charlie', 'andrew',
-  'abcdef', 'abcdefg', 'abcdefgh', 'abcd1234',
-  'abc123', 'a]bc1234', '1234abcd', 'pass1234',
-  '12345678', '123456789', '1234567890', '87654321',
-  '11111111', '00000000', '12341234', '11223344',
-  'internet', 'computer', 'whatever', 'changeme',
-]);
-
-// Keyboard patterns to detect
-const KEYBOARD_PATTERNS = [
-  'qwerty', 'qwertz', 'azerty', 'asdfgh', 'zxcvbn',
-  'qazwsx', '1qaz2wsx', 'qaswed', 'ytrewq', 'rewq',
-  '123456', '654321', '987654', '456789', '567890',
-];
-
-function hasKeyboardPattern(pwd) {
-  const lower = pwd.toLowerCase();
-  return KEYBOARD_PATTERNS.some((pattern) => lower.includes(pattern));
-}
-
-function hasRepeatingPattern(pwd) {
-  // Check for repeating sequences like "abcabc" or "123123"
-  const len = pwd.length;
-  for (let patternLen = 2; patternLen <= len / 2; patternLen += 1) {
-    const pattern = pwd.slice(0, patternLen);
-    const repeated = pattern.repeat(Math.ceil(len / patternLen)).slice(0, len);
-    if (repeated === pwd) return true;
-  }
-  // Check for character repetition like "aaaaaaaa"
-  if (/^(.)\1+$/.test(pwd)) return true;
-  return false;
-}
-
-// Password strength estimation using check-password-strength + common password check
-function estimatePasswordStrength(password) {
-  if (!password) return { score: 0, feedback: 'Password is required' };
-
-  // Minimum 8 characters required
-  if (password.length < 8) {
-    return { score: 0, feedback: 'Password must be at least 8 characters' };
-  }
-
-  // Check for common passwords (case-insensitive, ignoring trailing numbers/symbols)
-  const lowerPwd = password.toLowerCase();
-  const baseWord = lowerPwd.replace(/[0-9!@#$%^&*()]+$/g, '');
-  if (COMMON_PASSWORDS.has(lowerPwd) || COMMON_PASSWORDS.has(baseWord)) {
-    return { score: 1, feedback: 'This is a commonly used password' };
-  }
-
-  // Check for keyboard patterns
-  if (hasKeyboardPattern(password)) {
-    return { score: 1, feedback: 'Avoid keyboard patterns' };
-  }
-
-  // Check for repeating patterns
-  if (hasRepeatingPattern(password)) {
-    return { score: 1, feedback: 'Avoid repeating patterns' };
-  }
-
-  // Check what character types are present using simple regex
-  const hasLower = /[a-z]/.test(password);
-  const hasUpper = /[A-Z]/.test(password);
-  const hasNumber = /[0-9]/.test(password);
-  const hasSymbol = /[^A-Za-z0-9]/.test(password);
-  const hasNumberOrSymbol = hasNumber || hasSymbol;
-
-  // Build list of missing character types (numbers/symbols are either/or)
-  const missing = [];
-  if (!hasLower) missing.push('lowercase');
-  if (!hasUpper) missing.push('uppercase');
-  if (!hasNumberOrSymbol) missing.push('numbers or symbols');
-
-  // Determine score and feedback
-  let score;
-  let feedback;
-
-  if (missing.length >= 2) {
-    // Missing 2+ categories - weak
-    score = 1;
-    feedback = `Add ${missing.join(', ')}`;
-  } else if (missing.length === 1) {
-    // Missing 1 category - medium
-    score = 2;
-    feedback = `Add ${missing.join(', ')}`;
-  } else if (password.length < 12) {
-    // All categories but short
-    score = 2;
-    feedback = 'Consider a longer password';
-  } else {
-    // All categories and good length
-    score = 3;
-    feedback = 'Strong password';
-  }
-
-  return { score, feedback };
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (char) => HTML_ESCAPES[char]);
 }
 
 export default {
@@ -461,8 +270,13 @@ export default {
       showGeneratingSpinner: false,
       showGenerated: false,
       showRegenArea: true,
-      selectedHash: 'SHAKE_128',
+      // Must match the store default (src/store.js) — the select only writes
+      // to the store on change, so a mismatch would silently generate under a
+      // different hash function than the one displayed.
+      selectedHash: 'SHAKE_256',
       selectedHeight: 10,
+      qrllibVersion: __QRLLIB_VERSION__,
+      minPasswordLength: MINIMUM_PASSWORD_LENGTH,
       elapsedSeconds: 0,
       elapsedTimer: null,
       logoSvg: `data:image/svg+xml;base64,${btoa(logoSvgRaw)}`,
@@ -471,12 +285,9 @@ export default {
       // Encryption progress tracking
       encryptionProgress: 0,
       isEncrypting: false,
+      // Non-reactive in spirit; held so beforeUnmount can terminate it.
+      activeWorker: null,
     };
-  },
-  mounted() {
-    if (typeof QRLLIB !== 'undefined' && typeof QRLLIB.str2bin === 'function') {
-      this.qrllibLoaded = true;
-    }
   },
   computed: {
     estimatedTimeMessage() {
@@ -550,22 +361,36 @@ export default {
         // V3 encrypted format with scrypt + AES-256-GCM
         this.isEncrypting = true;
         this.encryptionProgress = 0;
+        this.errorM = '';
         try {
           walletEnvelope = await buildEncryptedEnvelope(
             walletData,
             this.password,
+            // Must not return a value: scrypt-js treats a truthy return from
+            // the progress callback as a cancellation request and aborts the
+            // derivation. Keep the braces.
             (progress) => { this.encryptionProgress = Math.round(progress * 100); },
           );
+        } catch (error) {
+          // Without this the rejection is unhandled, no file is written, and
+          // the user is left looking at "A password is required".
+          this.errorM = `Could not encrypt the wallet: ${error.message || error}. `
+            + 'The wallet has NOT been saved. Your details are still shown above.';
+          return;
         } finally {
           this.isEncrypting = false;
           this.encryptionProgress = 0;
-          // V-04: Clear password from memory after use
-          this.password = '';
-          this.passwordConfirm = '';
-          this.validated = false;
-          this.error = 'A password is required';
-          this.passwordStrength = { score: 0, feedback: 'Password is required' };
         }
+
+        // Only clear the password once the envelope exists. Clearing on
+        // failure would force the user to retype with no idea why.
+        // Note: this drops the reference and clears the input; JavaScript
+        // strings are immutable, so it does not scrub the value from memory.
+        this.password = '';
+        this.passwordConfirm = '';
+        this.validated = false;
+        this.error = 'A password is required';
+        this.passwordStrength = { score: 0, feedback: 'Password is required' };
       } else {
         // V3 unencrypted format
         walletEnvelope = buildUnencryptedEnvelope(walletData);
@@ -580,40 +405,27 @@ export default {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      // V-07: Fix Blob URL memory leak
-      window.URL.revokeObjectURL(blobUrl);
+      // Deferred: revoking synchronously after click() can race the download
+      // in some browsers, which would produce no file and no error.
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 0);
+    },
+
+    // A displayed-but-unsaved wallet exists only in this tab. Closing it is
+    // unrecoverable, and at the higher tree heights the user has just waited
+    // up to half an hour for it.
+    guardUnload(event) {
+      if (!this.showGenerated && !this.showGeneratingSpinner) return undefined;
+      event.preventDefault();
+      // Browsers show their own wording; the returned string is legacy.
+      event.returnValue = '';
+      return '';
     },
 
     check() {
-      // V-03: Enhanced password validation with strength check
-      this.passwordStrength = estimatePasswordStrength(this.password);
-
-      if (!this.password.length) {
-        this.error = 'A password is required';
-        this.validated = false;
-        return;
-      }
-
-      if (this.password.length < 8) {
-        this.error = 'Password must be at least 8 characters';
-        this.validated = false;
-        return;
-      }
-
-      if (this.passwordStrength.score < 1) {
-        this.error = this.passwordStrength.feedback;
-        this.validated = false;
-        return;
-      }
-
-      if (this.password !== this.passwordConfirm) {
-        this.error = 'Passwords must match';
-        this.validated = false;
-        return;
-      }
-
-      this.error = '';
-      this.validated = true;
+      const { validated, error, strength } = validatePassword(this.password, this.passwordConfirm);
+      this.passwordStrength = strength;
+      this.validated = validated;
+      this.error = error;
     },
 
     height() {
@@ -633,10 +445,13 @@ export default {
     },
 
     printWallet() {
-      // Get wallet data
-      const address = document.getElementById('address').textContent;
-      const mnemonic = document.getElementById('mnemonic').textContent;
-      const hexseed = document.getElementById('hexseed').textContent;
+      // These are QRLLIB outputs — hex and wordlist words — not user input, so
+      // they cannot carry markup today. Escaped anyway: this template is one
+      // refactor away from echoing user input onto a page that holds the
+      // hexseed, and the escaping costs nothing.
+      const address = escapeHtml(document.getElementById('address').textContent);
+      const mnemonic = escapeHtml(document.getElementById('mnemonic').textContent);
+      const hexseed = escapeHtml(document.getElementById('hexseed').textContent);
 
       // Create print-friendly HTML
       const printContent = `
@@ -784,10 +599,15 @@ export default {
       const { hexseedMnemonic } = this;
       const hashFunction = this.$store.state.hash;
       const xmssHeight = this.$store.state.height;
+      // Held on the instance so beforeUnmount can terminate it. terminate() is
+      // the one cleanup here that reliably destroys the seed and the XMSS
+      // object, so an orphaned worker keeps that material alive for the tab.
       const worker = new WalletWorker();
+      this.activeWorker = worker;
 
       worker.onmessage = (e) => {
         worker.terminate();
+        this.activeWorker = null;
         clearInterval(this.elapsedTimer);
         this.showGeneratingSpinner = false;
 
@@ -797,6 +617,9 @@ export default {
           this.showRegenArea = true;
           return;
         }
+
+        // The component may have been torn down and remounted while this ran.
+        if (!document.getElementById('address')) return;
 
         document.getElementById('address').textContent = e.data.address;
         document.getElementById('pk').textContent = e.data.pk;
@@ -809,6 +632,7 @@ export default {
 
       worker.onerror = (err) => {
         worker.terminate();
+        this.activeWorker = null;
         clearInterval(this.elapsedTimer);
         this.showGeneratingSpinner = false;
         this.showGenerateButton = true;
@@ -824,6 +648,24 @@ export default {
         hexseedMnemonic,
       });
     },
+  },
+  mounted() {
+    // Startup already gates mounting on the library being ready (src/main.js),
+    // so reaching here means it loaded. Probe anyway rather than assume — this
+    // flag is what reveals the whole interface.
+    this.qrllibLoaded = typeof QRLLIB !== 'undefined' && typeof QRLLIB.str2bin === 'function';
+    window.addEventListener('beforeunload', this.guardUnload);
+  },
+  beforeUnmount() {
+    window.removeEventListener('beforeunload', this.guardUnload);
+    // Navigating away mid-generation would otherwise leave the interval firing
+    // against a destroyed instance and a worker holding seed material alive
+    // with no owner for the lifetime of the tab.
+    clearInterval(this.elapsedTimer);
+    if (this.activeWorker) {
+      this.activeWorker.terminate();
+      this.activeWorker = null;
+    }
   },
 };
 </script>

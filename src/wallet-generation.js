@@ -4,8 +4,15 @@ export function toUint8Vector(qrllib, bytes) {
   return vector;
 }
 
+// Fails rather than defaulting: the hash function determines the address
+// format and signature scheme, so silently substituting one would produce a
+// wallet the user did not ask for with no visible difference until it is used
+// on-chain. `in` rather than `||` so an enum whose value is 0 still resolves.
 function getHashFunction(qrllib, name) {
-  return qrllib.eHashFunction[name] || qrllib.eHashFunction.SHAKE_128;
+  if (!(name in qrllib.eHashFunction)) {
+    throw new Error(`Unknown hash function: ${name}`);
+  }
+  return qrllib.eHashFunction[name];
 }
 
 export async function generateWalletData(qrllib, options) {
@@ -17,7 +24,7 @@ export async function generateWalletData(qrllib, options) {
       throw new Error('Wallet generation requires exactly 48 bytes of secure entropy');
     }
     const seedVector = toUint8Vector(qrllib, randomSeed);
-    xmss = await new qrllib.Xmss.fromParameters(
+    xmss = qrllib.Xmss.fromParameters(
       seedVector,
       xmssHeight,
       getHashFunction(qrllib, hashFunction),

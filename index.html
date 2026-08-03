@@ -6,14 +6,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>QRL Offline Wallet Generator</title>
     <script>
-      window.qrllibReady = new Promise((resolve) => {
+      // Rejects on timeout so a truncated download or a browser without
+      // WebAssembly produces a visible message rather than a blank page.
+      // Matches the worker's own QRLLIB load timeout.
+      window.qrllibReady = new Promise((resolve, reject) => {
         let qrllib;
+        var timeout = setTimeout(function () {
+          reject(new Error('The QRL cryptography library did not finish loading.'));
+        }, 15000);
         Object.defineProperty(window, 'QRLLIB', {
           configurable: true,
           get() { return qrllib; },
           set(value) {
             qrllib = value;
-            if (typeof value?.str2bin === 'function') resolve(value);
+            if (typeof value?.str2bin === 'function') {
+              clearTimeout(timeout);
+              resolve(value);
+            }
           }
         });
       });

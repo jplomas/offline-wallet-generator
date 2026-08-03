@@ -7,6 +7,14 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 
 const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
 
+// Displayed in the UI and asserted by scripts/check-offline-artifact.sh.
+// Derived from the installed package so it cannot drift from what actually
+// ships; qrllib-browserify's own dependency on qrllib is the real version.
+const qrllibPkg = JSON.parse(
+  readFileSync(resolve('node_modules/@theqrl/qrllib-browserify/package.json'), 'utf8'),
+)
+const qrllibVersion = qrllibPkg.dependencies?.qrllib ?? qrllibPkg.version
+
 function resolveCommit() {
   if (process.env.COMMIT_REF) return process.env.COMMIT_REF.slice(0, 12)
   try {
@@ -51,12 +59,27 @@ export default defineConfig(({ mode }) => {
     base: './',
     publicDir: offline ? false : 'public',
     plugins: [...(offline ? [inlinePublicImports()] : []), vue(), ...(offline ? [viteSingleFile(), inlinePublicAssets()] : [])],
-    resolve: { alias: { '@': resolve('src'), buffer: 'buffer' } },
+    resolve: {
+      alias: {
+        '@': resolve('src'),
+        buffer: 'buffer',
+        // jsPDF declares these as optional dependencies and reaches them
+        // through dynamic import() in its HTML-rendering path. We only call
+        // text/splitTextToSize/roundedRect/save, so that path is dead — but
+        // the offline build inlines dynamic imports, which would otherwise
+        // bake DOMPurify, html2canvas and canvg into the artefact users are
+        // asked to trust with their seed. Stub them out instead.
+        dompurify: resolve('src/empty-module.js'),
+        html2canvas: resolve('src/empty-module.js'),
+        canvg: resolve('src/empty-module.js'),
+      },
+    },
     define: {
       global: 'globalThis',
       __APP_VERSION__: JSON.stringify(pkg.version),
       __APP_BUILD_ID__: JSON.stringify(buildId),
       __OFFLINE_BUILD__: JSON.stringify(offline),
+      __QRLLIB_VERSION__: JSON.stringify(qrllibVersion),
     },
     optimizeDeps: { include: ['buffer'] },
     build: {
