@@ -89,6 +89,16 @@ test('the shipped CSP does not break a full wallet-generation session', async ({
   await page.getByRole('button', { name: /Save encrypted/ }).click();
   expect((await download).suggestedFilename()).toBe('wallet.json');
 
+  // The hosted build is also storage-free; the file:// specs cover the offline
+  // artefact, and a real HTTP origin is where a storage write would actually
+  // succeed, so assert it here too.
+  const stored = await page.evaluate(() => ({
+    local: window.localStorage.length,
+    session: window.sessionStorage.length,
+    cookie: document.cookie,
+  }));
+  expect(stored).toEqual({ local: 0, session: 0, cookie: '' });
+
   const pageViolations = await page.evaluate(() => window.__cspViolations || []);
   expect(
     [...pageViolations, ...consoleViolations],

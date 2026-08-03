@@ -78,8 +78,13 @@ while IFS= read -r url; do
     case "$url" in "$prefix"*) allowed=1 ;; esac
   done
   # Anchor hrefs to documentation and releases are navigation, not loading.
+  # Each pattern must end at a path boundary: a bare `…theqrl.org*` also
+  # matches `…theqrl.org.evil.com/steal`, which is the exact trick this gate
+  # exists to catch. The bare-origin forms are listed explicitly.
   case "$url" in
-    https://docs.theqrl.org/*|https://github.com/theQRL/*|https://offline-wallet-generator.theqrl.org*) allowed=1 ;;
+    https://docs.theqrl.org/*|https://docs.theqrl.org) allowed=1 ;;
+    https://github.com/theQRL/*) allowed=1 ;;
+    https://offline-wallet-generator.theqrl.org/*|https://offline-wallet-generator.theqrl.org) allowed=1 ;;
   esac
   [ "$allowed" = 0 ] && unexpected="$unexpected$url"$'\n'
 done <<< "$remote_hits"
@@ -131,15 +136,23 @@ else
   bad 'application content is missing'
 fi
 
-qrllib_version=$(node -p \
-  "const p=require('./node_modules/@theqrl/qrllib-browserify/package.json');p.dependencies?.qrllib ?? p.version" \
-  2>/dev/null || echo '')
-if [ -n "$qrllib_version" ]; then
-  if grep -a -q -F "qrllibVersion:\"$qrllib_version\"" "$FILE"; then
-    note "qrllib version constant: $qrllib_version"
-  else
-    bad "built artefact does not carry the installed qrllib version ($qrllib_version)"
-  fi
+# Resolve relative to this script, not the caller's cwd, and fail the gate if
+# the version cannot be determined. Leaving it empty previously skipped the
+# assertion silently — a check that quietly does nothing is worse than no
+# check, because the PASS line still claims it ran.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+QRLLIB_PKG="$REPO_ROOT/node_modules/@theqrl/qrllib-browserify/package.json"
+
+if [ ! -f "$QRLLIB_PKG" ]; then
+  bad "cannot resolve $QRLLIB_PKG — run 'npm ci' before checking the artefact"
+elif ! qrllib_version=$(node -p \
+  "const p=require('$QRLLIB_PKG');p.dependencies?.qrllib ?? p.version" 2>/dev/null) \
+  || [ -z "$qrllib_version" ]; then
+  bad 'could not determine the installed qrllib version'
+elif grep -a -q -F "qrllibVersion:\"$qrllib_version\"" "$FILE"; then
+  note "qrllib version constant: $qrllib_version"
+else
+  bad "built artefact does not carry the installed qrllib version ($qrllib_version)"
 fi
 
 # The WASM must be embedded, not fetched.
