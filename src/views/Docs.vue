@@ -6,13 +6,13 @@
       <div class="space-y-4">
         <p>This software will allow you to generate a wallet for use on the QRL network. For security, it is designed to be used in an offline environment. It is recommended to use this software from a bootable OS (e.g. Desktop Ubuntu distribution) without any network connection.</p>
 
-        <p>To run offline, download the latest .zip file from the <a class="link link-primary" href="https://github.com/theQRL/offline-wallet-generator/releases">GitHub Releases</a> page, extract the zip then run the offline.html file in your browser.</p>
+        <p>To run offline, download the latest single-file HTML and its SHA-256 checksum from <a class="link link-primary" href="https://github.com/theQRL/offline-wallet-generator/releases/latest">GitHub Releases</a>, verify it, disconnect from the network, then open the HTML file in your browser. No server or install is required.</p>
 
         <p>Generate new QRL wallets directly in your browser using the QRLLIB WebAssembly library. When the library has loaded successfully, a green checkmark will appear in the footer.</p>
 
         <h3 class="font-semibold">Configuration Options:</h3>
         <ul class="list-disc list-inside space-y-1">
-          <li><strong>Hash Function:</strong> SHAKE_128 (default), SHAKE_256, or SHA2_256</li>
+          <li><strong>Hash Function:</strong> SHAKE_256 (default), SHAKE_128, or SHA2_256</li>
           <li><strong>Tree Height:</strong> Determines the number of signatures available (default: 10 = 1,024 signatures)</li>
         </ul>
         <p>The defaults are suitable for most users. Higher tree heights provide more signatures but take longer to generate. Read more at <a class="link link-primary" href="https://docs.theqrl.org/wallet/basics/#qrl-web-wallet">the QRL docs site</a>.</p>
