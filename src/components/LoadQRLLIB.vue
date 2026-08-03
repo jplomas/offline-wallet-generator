@@ -21,7 +21,7 @@
               <!-- Hash Function Select -->
               <div class="flex flex-col items-center gap-1">
                 <span class="text-sm font-medium">Hash function</span>
-                <select class="select select-bordered select-secondary w-48" v-model="selectedHash" @change="thisHash(selectedHash)">
+                <select id="hashFunction" data-testid="hash-function" class="select select-bordered select-secondary w-48" v-model="selectedHash" @change="thisHash(selectedHash)">
                   <option value="SHAKE_128">SHAKE_128</option>
                   <option value="SHAKE_256">SHAKE_256</option>
                   <option value="SHA2_256">SHA2_256</option>
@@ -31,7 +31,7 @@
               <!-- Tree Height Select -->
               <div class="flex flex-col items-center gap-1">
                 <span class="text-sm font-medium">Tree height</span>
-                <select class="select select-bordered select-secondary w-64" v-model="selectedHeight" @change="thisHeight(selectedHeight)">
+                <select id="treeHeight" data-testid="tree-height" class="select select-bordered select-secondary w-64" v-model="selectedHeight" @change="thisHeight(selectedHeight)">
                   <option :value="8">Height: 8, Signatures: 256</option>
                   <option :value="10">Height: 10, Signatures: 1,024</option>
                   <option :value="12">Height: 12, Signatures: 4,096</option>

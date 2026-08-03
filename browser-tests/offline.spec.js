@@ -77,7 +77,7 @@ test('generates a wallet and attempts zero network requests', async ({ page }) =
   // store disagree and a wallet is generated under a different function than
   // the interface showed.
   expect(address.slice(1, 5)).toBe('0205');
-  await expect(page.locator('select.w-48')).toHaveValue('SHAKE_256');
+  await expect(page.getByTestId('hash-function')).toHaveValue('SHAKE_256');
 
   // The point of the whole exercise.
   expect(attempted, `artefact attempted network requests: ${attempted.join(', ')}`).toEqual([]);
@@ -145,13 +145,22 @@ test('secret-bearing inputs are not stored, transmitted or mangled by the browse
     await expect(field).toHaveAttribute('autocomplete', 'new-password');
   }
 
-  // Nothing may persist secrets outside the tab.
-  const stored = await page.evaluate(() => ({
-    local: window.localStorage.length,
-    session: window.sessionStorage.length,
-    cookie: document.cookie,
-  }));
-  expect(stored).toEqual({ local: 0, session: 0, cookie: '' });
+  // Nothing may persist secrets outside the tab. Reading storage from a
+  // file:// origin can throw SecurityError depending on browser flags, so a
+  // throw is recorded as a result rather than failing the test for the wrong
+  // reason — an inaccessible store is still an empty one.
+  const stored = await page.evaluate(() => {
+    const read = (fn) => { try { return fn(); } catch (e) { return `unavailable (${e.name})`; } };
+    return {
+      local: read(() => window.localStorage.length),
+      session: read(() => window.sessionStorage.length),
+      cookie: read(() => document.cookie),
+    };
+  });
+  for (const [store, value] of Object.entries(stored)) {
+    const empty = value === 0 || value === '' || String(value).startsWith('unavailable');
+    expect(empty, `${store} was not empty: ${value}`).toBe(true);
+  }
 });
 
 test('closing the tab with an unsaved wallet is guarded', async ({ page }) => {

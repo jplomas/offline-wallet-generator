@@ -15,8 +15,11 @@ import { buildEncryptedEnvelope, decryptEnvelope, DEFAULT_SCRYPT_PARAMS } from '
 // @theqrl/wallet-helpers is the library the web wallet uses. Decrypting our
 // output with it is what turns "we believe this is v3" into "this is v3".
 
+// The package's public entry, not dist/v3wallet.js — reaching into a
+// dependency's internal layout means a repackaging upstream breaks the one
+// test that proves our wallets are readable.
 const require = createRequire(import.meta.url);
-const { v3WalletDecrypt, v3Wallet } = require('@theqrl/wallet-helpers/dist/v3wallet.js');
+const { v3WalletDecrypt, v3Wallet } = require('@theqrl/wallet-helpers');
 
 // Reduced work factor keeps the suite fast; the serialisation under test is
 // identical at any N, and the parameters travel inside the envelope.

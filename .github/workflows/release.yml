@@ -117,7 +117,11 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      # Both trees, matching ci.yml — a release must never be gated more
+      # loosely than a pull request. The runtime tree ships inside the artefact;
+      # the build tree runs inside the job that produces it.
       - run: npm audit --omit=dev --audit-level=low
+      - run: npm audit --audit-level=high
       # dist/ is needed by csp.spec.js below, which checks the shipped
       # Content-Security-Policy against a real served deployment.
       - run: npm run build

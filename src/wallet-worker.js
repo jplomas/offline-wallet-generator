@@ -23,6 +23,11 @@ const qrllibReady = new Promise((resolve, reject) => {
   (0, eval)(qrllibSource);
 });
 
+// The timeout above rejects 15s after this module loads. If no message has
+// arrived by then nothing is awaiting the promise yet, and the rejection would
+// surface as an unhandled rejection in the worker. onmessage still sees it.
+qrllibReady.catch(() => {});
+
 self.onmessage = async ({ data }) => {
   try {
     const qrllib = await qrllibReady;

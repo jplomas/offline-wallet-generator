@@ -26,11 +26,16 @@ try {
   process.exit(1);
 }
 
-const bytes = readFileSync(target);
-const digest = createHash('sha256').update(bytes).digest('hex');
-const pkg = JSON.parse(readFileSync(resolve(root, 'node_modules/@theqrl/qrllib-browserify/package.json'), 'utf8'));
-
-console.log(
-  `postinstall: qrllib ${pkg.dependencies?.qrllib ?? pkg.version} `
-  + `(${bytes.length} bytes, sha256 ${digest.slice(0, 16)}…) -> public/qrllib.js`,
-);
+// Reporting only. The copy above is what the build needs, so a failure to
+// read metadata or hash the file must not fail `npm ci`.
+try {
+  const bytes = readFileSync(target);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const pkg = JSON.parse(readFileSync(resolve(root, 'node_modules/@theqrl/qrllib-browserify/package.json'), 'utf8'));
+  console.log(
+    `postinstall: qrllib ${pkg.dependencies?.qrllib ?? pkg.version} `
+    + `(${bytes.length} bytes, sha256 ${digest.slice(0, 16)}…) -> public/qrllib.js`,
+  );
+} catch (error) {
+  console.warn(`postinstall: copied qrllib.js but could not report on it — ${error.message}`);
+}
