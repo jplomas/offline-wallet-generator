@@ -15,7 +15,7 @@
         </ul>
       </div>
       <div class="navbar-end pr-4">
-        <span class="text-xs text-neutral-content/60">v{{ appVersion }} &middot; {{ buildDate }}</span>
+        <span class="text-xs text-neutral-content/60">{{ buildId }}</span>
       </div>
     </nav>
 
@@ -26,7 +26,7 @@
     <div class="h-20 bg-base-300"></div>
 
     <footer class="footer footer-center p-4 bg-neutral text-neutral-content border-t border-black/40 shadow-[0_-5px_5px_-5px_rgba(0,0,0,0.22)]">
-      <div class="flex items-center gap-4">
+      <div class="flex flex-wrap items-center justify-center gap-4">
         <img class="h-14" :src="logoSvg" alt="QRL Logo">
         <div v-if="qrllibLoaded" class="text-left">
           <p class="text-sm text-neutral-content/80"><font-awesome-icon icon="check" class="text-success mr-1" />QRL Library loaded</p>
@@ -36,13 +36,15 @@
           <p class="text-sm text-error"><font-awesome-icon icon="triangle-exclamation" class="mr-1" />Failed to load QRL Library</p>
           <p class="text-xs text-neutral-content/60">Please refresh the page</p>
         </div>
+        <a v-if="!isOfflineBuild" class="link link-hover text-sm" href="https://offline-wallet-generator.theqrl.org" rel="noopener">Open deployed wallet</a>
+        <a class="link link-hover text-sm" href="https://github.com/theQRL/offline-wallet-generator/releases/latest" rel="noopener">Download offline release</a>
       </div>
     </footer>
   </div>
 </template>
 
 <script>
-/* global QRLLIB, __APP_VERSION__, __BUILD_DATE__ */
+/* global __APP_BUILD_ID__, __OFFLINE_BUILD__ */
 import logoSvgRaw from '/logo.svg?raw';
 
 export default {
@@ -52,8 +54,8 @@ export default {
       qrllibLoaded: false,
       qrllibLoadFailed: false,
       logoSvg: `data:image/svg+xml;base64,${btoa(logoSvgRaw)}`,
-      appVersion: __APP_VERSION__,
-      buildDate: __BUILD_DATE__,
+      buildId: __APP_BUILD_ID__,
+      isOfflineBuild: __OFFLINE_BUILD__,
     };
   },
   mounted() {

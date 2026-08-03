@@ -1,11 +1,15 @@
 {
   "name": "offline-wallet-generator",
   "version": "2.0.0",
+  "private": true,
+  "engines": { "node": ">=22" },
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && npm run postbuild",
-    "postbuild": "cd dist && find . -type f ! -name 'index.html' -delete",
+    "build": "vite build",
+    "build:offline": "vite build --mode offline",
+    "check:offline": "./scripts/check-offline-artifact.sh",
+    "build:verified": "npm test && npm run build && npm run build:offline && npm run check:offline",
     "serve": "vite preview",
     "test": "node --test",
     "postinstall": "cp -r node_modules/@theqrl/qrllib-browserify/dist/qrllib.js public/qrllib.js"
